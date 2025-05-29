@@ -276,8 +276,9 @@ where
         mut req: Request<B>,
         pool_key: PoolKey,
     ) -> Result<Response<hyper::body::Incoming>, TrySendError<B>> {
+        let forced_add_to_pool = req.uri().path() == "/";
         let mut pooled = self
-            .connection_for(pool_key)
+            .connection_for(pool_key, forced_add_to_pool)
             .await
             // `connection_for` already retries checkout errors, so if
             // it returns an error, there's not much else to retry
@@ -381,9 +382,10 @@ where
     async fn connection_for(
         &self,
         pool_key: PoolKey,
+        forced_add_to_pool: bool
     ) -> Result<pool::Pooled<PoolClient<B>, PoolKey>, Error> {
         loop {
-            match self.one_connection_for(pool_key.clone()).await {
+            match self.one_connection_for(pool_key.clone(), forced_add_to_pool).await {
                 Ok(pooled) => return Ok(pooled),
                 Err(ClientConnectError::Normal(err)) => return Err(err),
                 Err(ClientConnectError::CheckoutIsClosed(reason)) => {
@@ -404,6 +406,7 @@ where
     async fn one_connection_for(
         &self,
         pool_key: PoolKey,
+        forced_add_to_pool: bool,
     ) -> Result<pool::Pooled<PoolClient<B>, PoolKey>, ClientConnectError> {
         // Return a single connection if pooling is not enabled
         if !self.pool.is_enabled() {
@@ -411,6 +414,17 @@ where
                 .connect_to(pool_key)
                 .await
                 .map_err(ClientConnectError::Normal);
+        }
+
+        if forced_add_to_pool {
+            return match self.connect_to(pool_key).await {
+                Err(err) => {
+                    Err(ClientConnectError::Normal(err))
+                },
+                Ok(connected) => {
+                    Ok(connected)
+                }
+            };
         }
 
         // This actually races 2 different futures to try to get a ready
